@@ -34,7 +34,10 @@ async def get_debater_report(
 
     strategy_notes = None
     if notes and settings.groq_api_key:
-        strategy_notes = await generate_strategy_notes(summary, settings.groq_api_key, settings.groq_model)
+        try:
+            strategy_notes = await generate_strategy_notes(summary, settings.groq_api_key, settings.groq_model)
+        except Exception as exc:
+            summary.warnings.append(f"AI strategy notes failed ({exc}) -- showing the record/stats without them.")
     elif notes and not settings.groq_api_key:
         summary.warnings.append("GROQ_API_KEY not configured -- skipped AI strategy notes.")
 
