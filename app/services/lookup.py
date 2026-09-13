@@ -48,23 +48,52 @@ def _normalize_side(side: Optional[str]) -> Optional[str]:
 
 async def _resolve_rounds(
     settings: Settings, school_hint: str, debater_name: str
-) -> Tuple[Optional[str], List[RoundResult]]:
+) -> Tuple[Optional[str], List[RoundResult], List[str]]:
     """Opencaselist rounds (source of truth for which tournaments/rounds
     happened + what was read) joined with Tabroom's scraped win/loss for
     each of those rounds via tourn_id/external_id.
 
-    Returns (school_slug_matched, rounds).
+    Returns (school_slug_matched, rounds, diagnostics). `diagnostics`
+    pinpoints exactly which step failed (school not found / team not found /
+    no disclosed rounds) instead of a single opaque "not found."
     """
     rounds: List[RoundResult] = []
+    diagnostics: List[str] = []
 
     async with OpencaselistClient(
         settings.opencaselist_username, settings.opencaselist_password
     ) as oc:
-        found = await oc.search_school_and_team(settings.caselist_slug, school_hint, debater_name)
-        if not found:
-            return None, rounds
-        oc_rounds = found["rounds"]
-        school_slug = found["school"]
+        school_slug = await oc.find_school(settings.caselist_slug, school_hint)
+        if not school_slug:
+            suggestions = await oc.suggest_schools(settings.caselist_slug, school_hint)
+            if suggestions:
+                diagnostics.append(
+                    f"No school on Opencaselist matched '{school_hint}' exactly. "
+                    f"Closest listed names: {', '.join(suggestions)}."
+                )
+            else:
+                diagnostics.append(
+                    f"No school on Opencaselist resembles '{school_hint}' at all -- double-check "
+                    f"CASELIST_SLUG ('{settings.caselist_slug}') is the right slug for this season."
+                )
+            return None, rounds, diagnostics
+
+        team = await oc.find_team(settings.caselist_slug, school_slug, debater_name)
+        if not team:
+            diagnostics.append(
+                f"Found '{school_slug}' on Opencaselist, but no team there matches the name "
+                f"'{debater_name}' -- they may not be disclosing, may be listed under a partner's "
+                f"name, or the name doesn't match how Opencaselist has it spelled."
+            )
+            return school_slug, rounds, diagnostics
+
+        oc_rounds = await oc.get_team_rounds(settings.caselist_slug, school_slug, team["name"])
+        if not oc_rounds:
+            diagnostics.append(
+                f"Found the team at '{school_slug}' on Opencaselist, but they haven't disclosed "
+                f"any rounds yet this season."
+            )
+            return school_slug, rounds, diagnostics
 
     async with TabroomClient(settings.tabroom_username, settings.tabroom_password) as tb:
         for r in oc_rounds:
@@ -94,7 +123,7 @@ async def _resolve_rounds(
                 )
             )
 
-    return school_slug, rounds
+    return school_slug, rounds, diagnostics
 
 
 async def lookup_debater(
@@ -112,7 +141,8 @@ async def lookup_debater(
     school_for_oc = school_hint or query
 
     try:
-        school_matched, rounds = await _resolve_rounds(settings, school_for_oc, query)
+        school_matched, rounds, resolve_diagnostics = await _resolve_rounds(settings, school_for_oc, query)
+        warnings.extend(resolve_diagnostics)
     except Exception as exc:
         rounds = []
         school_matched = None
@@ -120,12 +150,6 @@ async def lookup_debater(
 
     if rounds:
         data_sources.extend(["opencaselist", "tabroom"])
-    elif not warnings or school_hint:
-        warnings.append(
-            "No disclosure found on Opencaselist for that name/school -- this debater may not be "
-            "disclosing, may compete on a different circuit, or the school name didn't match "
-            "closely enough (try the exact name Opencaselist lists, e.g. 'Harvard-Westlake' not 'HW')."
-        )
 
     overall_record, win_pct = stats_service.compute_overall_record(rounds)
     most_read, by_win_pct = stats_service.compute_argument_stats(rounds)
