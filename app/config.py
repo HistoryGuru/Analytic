@@ -25,16 +25,10 @@ class Settings(BaseSettings):
 
     # Season config
     caselist_slug: str = "hsld26"
-    debateland_season: str = "SY_25_26"
-    debateland_circuits: str = "National,Local"
 
     # Cache / CORS
     cache_ttl_seconds: int = 900
     cors_origins: str = "http://localhost:5173,http://localhost:3000"
-
-    @property
-    def debateland_circuit_list(self) -> List[str]:
-        return [c.strip() for c in self.debateland_circuits.split(",") if c.strip()]
 
     @property
     def cors_origin_list(self) -> List[str]:

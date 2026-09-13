@@ -1,31 +1,35 @@
 """
-Orchestrates a single debater lookup end-to-end:
+Orchestrates a single debater lookup end-to-end.
 
-  1. Try Tournaments.Tech (the pre-aggregated, Debate-Land-style source) for
-     the overall win/loss record and round-by-round results.
-  2. Always query Opencaselist too (independently) for disclosed
-     arguments/cases per round -- Tournaments.Tech doesn't have this data at
-     all, so this step isn't really a "fallback", it's a second source we
-     join against.
-  3. Join the two by (tourn_id, side, round-name) where possible so each
-     round result gets tagged with what was actually read.
-  4. If Tournaments.Tech had nothing, fall back fully to the manual path:
-     Opencaselist rounds (which include Tabroom's own tourn_id/external_id)
-     + TabroomClient HTML scraping for the win/loss on each of those rounds.
-  5. Best-effort: for a handful of rounds, also resolve the OPPONENT's own
-     Opencaselist disclosure for that same round, to compute "win % when
-     responding to argument X". This is capped to avoid an unbounded
-     fan-out of requests for a single lookup.
+Opencaselist is the anchor: it's organized by school -> team -> rounds, and
+each disclosed round carries Tabroom's own tourn_id + external_id. So the
+flow is:
+
+  1. Resolve the debater's school + team on Opencaselist (requires a school
+     hint -- Opencaselist has no cross-school name search, only
+     school -> teams, so without a school we can only guess by treating the
+     query itself as a school name, which rarely works).
+  2. For each disclosed round, scrape Tabroom (www.tabroom.com, NOT
+     staging.tabroom.com -- staging is Tabroom's own internal test server
+     for the platform itself, unrelated to any individual tournament) for
+     the win/loss on that specific round, using the tourn_id/external_id
+     Opencaselist gave us.
+  3. Compute overall record + most-read arguments + win % per argument from
+     the joined rows.
+  4. Best-effort, capped: resolve a handful of opponents' own Opencaselist
+     disclosure for the same rounds, to compute "win % facing argument X".
+
+(We previously tried Tournaments.Tech first as a pre-aggregated shortcut --
+removed, since it's a Public Forum results database and doesn't cover LD.)
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
-from app.clients.debateland_client import DebateLandClient
 from app.clients.opencaselist_client import OpencaselistClient
 from app.clients.tabroom_client import TabroomClient
 from app.config import Settings
-from app.schemas import DataSource, DebaterSummary, RoundResult
+from app.schemas import DebaterSummary, RoundResult
 from app.services import stats as stats_service
 
 _MAX_OPPONENT_LOOKUPS = 12  # cap on "argument faced" resolution per query
@@ -42,109 +46,25 @@ def _normalize_side(side: Optional[str]) -> Optional[str]:
     return side
 
 
-def _parse_debateland_rounds(team: Dict[str, Any]) -> List[RoundResult]:
+async def _resolve_rounds(
+    settings: Settings, school_hint: str, debater_name: str
+) -> Tuple[Optional[str], List[RoundResult]]:
+    """Opencaselist rounds (source of truth for which tournaments/rounds
+    happened + what was read) joined with Tabroom's scraped win/loss for
+    each of those rounds via tourn_id/external_id.
+
+    Returns (school_slug_matched, rounds).
     """
-    Best-effort parse of a Tournaments.Tech Team/Entry object into
-    RoundResult rows. Ref fields (tournament, opponent) may come back as
-    plain id strings rather than expanded objects depending on whether the
-    /query call included `expand` -- we handle both.
-    """
-    out: List[RoundResult] = []
-    for tr in team.get("tournaments", []) or []:
-        tournament_ref = tr.get("tournament")
-        tourn_name = tournament_ref.get("name") if isinstance(tournament_ref, dict) else None
-        tourn_id_raw = tournament_ref.get("tourn_id") if isinstance(tournament_ref, dict) else None
-        try:
-            tourn_id = int(tourn_id_raw) if tourn_id_raw is not None else None
-        except (TypeError, ValueError):
-            tourn_id = None
-
-        for bucket in ("prelim_rounds", "elim_rounds"):
-            for rd in tr.get(bucket, []) or []:
-                if not isinstance(rd, dict):
-                    continue  # unexpanded ref, nothing to parse
-                opponent_ref = rd.get("opponent")
-                opponent_name = None
-                if isinstance(opponent_ref, dict):
-                    codes = opponent_ref.get("codes") or []
-                    opponent_name = codes[0] if codes else opponent_ref.get("_id")
-
-                out.append(
-                    RoundResult(
-                        tournament=tourn_name,
-                        round_name=rd.get("name") or rd.get("name_std"),
-                        side=_normalize_side(rd.get("side")),
-                        opponent=opponent_name,
-                        result=rd.get("result"),
-                        tourn_id=tourn_id,
-                        source_note="tournaments.tech",
-                    )
-                )
-    return out
-
-
-def _record_from_statistics(
-    team: Dict[str, Any]
-) -> Tuple[Optional[str], Optional[str], Optional[float], Optional[str]]:
-    """Returns (prelim_record_str, elim_record_str, win_pct, overall_record_str)."""
-    stats = team.get("statistics") or {}
-    prelim = stats.get("prelim_record")
-    elim = stats.get("elim_record")
-    prelim_str = f"{prelim[0]}-{prelim[1]}" if prelim else None
-    elim_str = f"{elim[0]}-{elim[1]}" if elim else None
-
-    wins = (prelim[0] if prelim else 0) + (elim[0] if elim else 0)
-    losses = (prelim[1] if prelim else 0) + (elim[1] if elim else 0)
-    decided = wins + losses
-    if not decided:
-        return prelim_str, elim_str, None, None
-    win_pct = round(100 * wins / decided, 1)
-    overall = f"{wins}-{losses}"
-    return prelim_str, elim_str, win_pct, overall
-
-
-async def _join_argument_data(
-    rounds: List[RoundResult], oc_rounds: List[Dict[str, Any]]
-) -> None:
-    """Mutates `rounds` in place, attaching `.argument` where a matching
-    Opencaselist disclosure round is found (matched on tourn_id + side,
-    then best-effort on opponent-name substring)."""
-    by_tourn_side: Dict[Tuple[Optional[int], Optional[str]], List[Dict[str, Any]]] = {}
-    for r in oc_rounds:
-        key = (r.get("tourn_id"), _normalize_side(r.get("side")))
-        by_tourn_side.setdefault(key, []).append(r)
-
-    for rr in rounds:
-        candidates = by_tourn_side.get((rr.tourn_id, rr.side), [])
-        if not candidates:
-            continue
-        if len(candidates) == 1:
-            rr.argument = candidates[0].get("report") or None
-            continue
-        # multiple disclosures at the same tournament/side: narrow by opponent substring
-        opp = (rr.opponent or "").lower()
-        for c in candidates:
-            c_opp = (c.get("opponent") or "").lower()
-            if opp and (opp in c_opp or c_opp in opp):
-                rr.argument = c.get("report") or None
-                break
-
-
-async def _manual_join(
-    settings: Settings, caselist_slug: str, school_hint: str, debater_name: str
-) -> List[RoundResult]:
-    """Full manual fallback: Opencaselist rounds (source of truth for which
-    tournaments/rounds happened + what was read) joined with Tabroom's
-    scraped win/loss for each of those rounds via tourn_id/external_id."""
     rounds: List[RoundResult] = []
 
     async with OpencaselistClient(
         settings.opencaselist_username, settings.opencaselist_password
     ) as oc:
-        found = await oc.search_school_and_team(caselist_slug, school_hint, debater_name)
+        found = await oc.search_school_and_team(settings.caselist_slug, school_hint, debater_name)
         if not found:
-            return rounds
+            return None, rounds
         oc_rounds = found["rounds"]
+        school_slug = found["school"]
 
     async with TabroomClient(settings.tabroom_username, settings.tabroom_password) as tb:
         for r in oc_rounds:
@@ -170,76 +90,54 @@ async def _manual_join(
                     result=result_val,
                     argument=r.get("report"),
                     tourn_id=tourn_id,
-                    source_note="opencaselist + tabroom (manual join)",
+                    source_note="opencaselist + tabroom",
                 )
             )
 
-    return rounds
+    return school_slug, rounds
 
 
 async def lookup_debater(
     settings: Settings, query: str, school_hint: Optional[str] = None
 ) -> DebaterSummary:
     warnings: List[str] = []
-    data_sources: List[DataSource] = []
-    rounds: List[RoundResult] = []
-    matched_name = None
-    school = None
-    overall_record = None
-    win_pct = None
-    prelim_record = None
-    elim_record = None
+    data_sources: List[str] = []
 
-    # --- Step 1: Tournaments.Tech (aggregated record) ---
-    dl_client = DebateLandClient(settings.debateland_season, settings.debateland_circuit_list)
-    team = await dl_client.query_debater(query)
-
-    if team:
-        data_sources.append(DataSource.TOURNAMENTS_TECH)
-        matched_name = ", ".join(
-            c.get("name", "") for c in team.get("competitors", []) if isinstance(c, dict)
-        ) or team.get("codes", [None])[0]
-        school = (team.get("schools") or [None])[0]
-        prelim_record, elim_record, win_pct, overall_record = _record_from_statistics(team)
-        rounds = _parse_debateland_rounds(team)
-        if not rounds:
-            warnings.append(
-                "Tournaments.Tech had an aggregate record but round-level detail wasn't "
-                "expanded in the response -- win/loss breakdowns by argument may be incomplete."
-            )
-    else:
-        warnings.append("No record found on Tournaments.Tech; falling back to manual Tabroom + Opencaselist join.")
-
-    # --- Step 2: Opencaselist (argument disclosure) ---
-    school_for_oc = school_hint or school or query
-    try:
-        async with OpencaselistClient(
-            settings.opencaselist_username, settings.opencaselist_password
-        ) as oc:
-            found = await oc.search_school_and_team(settings.caselist_slug, school_for_oc, query)
-    except Exception:
-        found = None
-
-    if found:
-        data_sources.append(DataSource.MANUAL_JOIN if not team else DataSource.MIXED)
-        if rounds:
-            await _join_argument_data(rounds, found["rounds"])
-        else:
-            # No Tournaments.Tech data at all -- do the full manual join,
-            # which also fetches win/loss via Tabroom scraping.
-            rounds = await _manual_join(settings, settings.caselist_slug, school_for_oc, query)
-    elif not team:
+    if not school_hint:
         warnings.append(
-            "No disclosure found on Opencaselist either -- this debater may not be disclosing, "
-            "may compete on a different circuit, or the name/school didn't match closely enough."
+            "No school provided -- Opencaselist is organized by school, not by a global name "
+            "search, so results will be much more reliable if you include the debater's school."
         )
 
-    if not overall_record:
-        overall_record, win_pct = stats_service.compute_overall_record(rounds)
+    school_for_oc = school_hint or query
 
+    try:
+        school_matched, rounds = await _resolve_rounds(settings, school_for_oc, query)
+    except Exception as exc:
+        rounds = []
+        school_matched = None
+        warnings.append(f"Lookup failed while contacting Opencaselist or Tabroom: {exc}")
+
+    if rounds:
+        data_sources.extend(["opencaselist", "tabroom"])
+    elif not warnings or school_hint:
+        warnings.append(
+            "No disclosure found on Opencaselist for that name/school -- this debater may not be "
+            "disclosing, may compete on a different circuit, or the school name didn't match "
+            "closely enough (try the exact name Opencaselist lists, e.g. 'Harvard-Westlake' not 'HW')."
+        )
+
+    overall_record, win_pct = stats_service.compute_overall_record(rounds)
     most_read, by_win_pct = stats_service.compute_argument_stats(rounds)
 
-    # --- Step 3 (best effort, capped): argument-faced win rates ---
+    if rounds and not any(r.result for r in rounds):
+        warnings.append(
+            "Found disclosed rounds on Opencaselist, but couldn't confirm win/loss from Tabroom "
+            "for any of them -- the Tabroom results-page scraper may need its selector adjusted "
+            "for this tournament's page layout (see tabroom_client.py)."
+        )
+
+    # --- Best effort, capped: argument-faced win rates ---
     faced_pairs: List[Tuple[str, Optional[str]]] = []
     rounds_with_opponents = [r for r in rounds if r.opponent and r.result][:_MAX_OPPONENT_LOOKUPS]
     if rounds_with_opponents:
@@ -272,16 +170,14 @@ async def lookup_debater(
 
     return DebaterSummary(
         query=query,
-        matched_name=matched_name or query,
-        school=school or school_hint,
+        matched_name=query,
+        school=school_matched or school_hint,
         overall_record=overall_record,
         win_pct=win_pct,
-        prelim_record=prelim_record,
-        elim_record=elim_record,
         most_read_arguments=most_read,
         win_pct_by_argument_read=by_win_pct,
         win_pct_vs_argument_faced=win_pct_vs_faced,
         rounds=rounds,
-        data_sources=data_sources or [],
+        data_sources=data_sources,
         warnings=warnings,
     )

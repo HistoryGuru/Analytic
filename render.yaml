@@ -6,6 +6,8 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.7
       - key: TABROOM_USERNAME
         sync: false
       - key: TABROOM_PASSWORD
@@ -20,10 +22,6 @@ services:
         value: llama-3.3-70b-versatile
       - key: CASELIST_SLUG
         value: hsld26
-      - key: DEBATELAND_SEASON
-        value: SY_25_26
-      - key: DEBATELAND_CIRCUITS
-        value: National,Local
       - key: CACHE_TTL_SECONDS
         value: "900"
       - key: CORS_ORIGINS

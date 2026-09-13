@@ -1,15 +1,8 @@
 """Pydantic models shared across the app -- these define the shape of the
 final API response, independent of which upstream source produced the data."""
-from enum import Enum
 from typing import List, Optional
 
 from pydantic import BaseModel
-
-
-class DataSource(str, Enum):
-    TOURNAMENTS_TECH = "tournaments_tech"      # aggregated win/loss (the "Debate Land"-style source)
-    MANUAL_JOIN = "manual_join"                # opencaselist + tabroom, joined by hand
-    MIXED = "mixed"                            # tournaments.tech for record + opencaselist for arguments
 
 
 class RoundResult(BaseModel):
@@ -21,7 +14,7 @@ class RoundResult(BaseModel):
     result: Optional[str] = None        # "Win" / "Loss" / "Bye" / None if unknown
     argument: Optional[str] = None      # disclosed case/position name, if we found one
     tourn_id: Optional[int] = None
-    source_note: Optional[str] = None   # brief provenance, e.g. "tournaments.tech + opencaselist"
+    source_note: Optional[str] = None   # brief provenance, e.g. "opencaselist + tabroom"
 
 
 class ArgumentStat(BaseModel):
@@ -60,8 +53,8 @@ class DebaterSummary(BaseModel):
 
     rounds: List[RoundResult] = []
 
-    data_sources: List[DataSource] = []
-    warnings: List[str] = []             # e.g. "Tournaments.Tech had no record; used manual join"
+    data_sources: List[str] = []         # e.g. ["opencaselist", "tabroom"]
+    warnings: List[str] = []             # e.g. "No school provided -- results may be unreliable"
 
 
 class StrategyNotes(BaseModel):

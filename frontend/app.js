@@ -47,8 +47,8 @@
   };
 
   var LOADING_MESSAGES = [
-    "Searching Tournaments.Tech and Opencaselist…",
-    "Cross-referencing disclosed arguments…",
+    "Searching Opencaselist for disclosed arguments…",
+    "Scraping Tabroom for round results…",
     "Drafting scouting notes…",
   ];
 
@@ -206,7 +206,7 @@
   function runSearch(name, school) {
     name = (name || "").trim();
     school = (school || "").trim();
-    if (!name) return;
+    if (!name || !school) return;
 
     // keep both search bars in sync
     el.searchName.value = name;

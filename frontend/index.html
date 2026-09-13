@@ -26,7 +26,7 @@
       <input type="text" id="report-search-name" placeholder="Debater name" required />
     </div>
     <div class="search-field-school">
-      <input type="text" id="report-search-school" placeholder="School (optional)" />
+      <input type="text" id="report-search-school" placeholder="School" required />
     </div>
     <button type="submit" class="search-submit">Search</button>
   </form>
@@ -35,8 +35,9 @@
   <section class="search-hero" id="search-hero">
     <h1>Scout your next opponent.</h1>
     <p>
-      Enter a debater's name — add their school if the name is common.
-      LD Scout checks Tournaments.Tech and Opencaselist for their record,
+      Enter a debater's name and school — Opencaselist is organized by
+      school, so the school matters more than you'd expect. LD Scout checks
+      Opencaselist for disclosed arguments and Tabroom for round results,
       then drafts a strategy note.
     </p>
     <form class="search-form" id="search-form" autocomplete="off">
@@ -44,15 +45,15 @@
         <input type="text" id="search-name" placeholder="e.g. Jane Doe" required />
       </div>
       <div class="search-field-school">
-        <input type="text" id="search-school" placeholder="School (optional)" />
+        <input type="text" id="search-school" placeholder="School (e.g. Harvard-Westlake)" required />
       </div>
       <button type="submit" class="search-submit" id="search-submit">Search</button>
     </form>
-    <p class="search-hint">Results are pulled live, not from a stored database — the first search for someone new can take a few seconds.</p>
+    <p class="search-hint">Results are pulled live, not from a stored database — the first search can take a few seconds. School is required, since Opencaselist looks debaters up by school rather than by name alone.</p>
 
     <div class="source-legend">
-      <div class="source-legend__item"><span class="source-legend__dot"></span>Tournaments.Tech for win/loss records</div>
       <div class="source-legend__item"><span class="source-legend__dot"></span>Opencaselist for disclosed arguments</div>
+      <div class="source-legend__item"><span class="source-legend__dot"></span>Tabroom for round-by-round results</div>
       <div class="source-legend__item"><span class="source-legend__dot"></span>Groq-hosted model for strategy notes</div>
     </div>
   </section>

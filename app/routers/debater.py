@@ -27,8 +27,9 @@ async def get_debater_report(
     if not summary.rounds and not summary.overall_record:
         raise HTTPException(
             status_code=404,
-            detail="Couldn't find this debater on Tournaments.Tech or Opencaselist. "
-            "Try including their school (e.g. 'Jane Doe, Harvard-Westlake') or double-check spelling.",
+            detail="Couldn't find this debater on Opencaselist. Opencaselist is organized by "
+            "school, so a `school` param matching their team's listed school is usually required "
+            "-- try the ?school= query param, or double-check spelling of both name and school.",
         )
 
     strategy_notes = None
