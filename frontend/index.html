@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LD Scout</title>
+<meta name="description" content="Look up a Lincoln-Douglas debater's record, most-read arguments, and a suggested strategy." />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<header class="site-header">
+  <div class="site-header__inner">
+    <p class="wordmark"><span>LD</span> Scout<span class="wordmark-sub">Lincoln-Douglas opponent research</span></p>
+  </div>
+</header>
+
+<main class="page">
+
+  <!-- Persistent search bar shown once a report is on screen -->
+  <form class="report-search-bar" id="report-search-bar" autocomplete="off">
+    <div class="search-field">
+      <input type="text" id="report-search-name" placeholder="Debater name" required />
+    </div>
+    <div class="search-field-school">
+      <input type="text" id="report-search-school" placeholder="School (optional)" />
+    </div>
+    <button type="submit" class="search-submit">Search</button>
+  </form>
+
+  <!-- Empty state / initial search -->
+  <section class="search-hero" id="search-hero">
+    <h1>Scout your next opponent.</h1>
+    <p>
+      Enter a debater's name — add their school if the name is common.
+      LD Scout checks Tournaments.Tech and Opencaselist for their record,
+      then drafts a strategy note.
+    </p>
+    <form class="search-form" id="search-form" autocomplete="off">
+      <div class="search-field">
+        <input type="text" id="search-name" placeholder="e.g. Jane Doe" required />
+      </div>
+      <div class="search-field-school">
+        <input type="text" id="search-school" placeholder="School (optional)" />
+      </div>
+      <button type="submit" class="search-submit" id="search-submit">Search</button>
+    </form>
+    <p class="search-hint">Results are pulled live, not from a stored database — the first search for someone new can take a few seconds.</p>
+
+    <div class="source-legend">
+      <div class="source-legend__item"><span class="source-legend__dot"></span>Tournaments.Tech for win/loss records</div>
+      <div class="source-legend__item"><span class="source-legend__dot"></span>Opencaselist for disclosed arguments</div>
+      <div class="source-legend__item"><span class="source-legend__dot"></span>Groq-hosted model for strategy notes</div>
+    </div>
+  </section>
+
+  <!-- Loading -->
+  <section class="status-block status-block--loading" id="status-loading">
+    <div class="status-line"><span class="spinner"></span><span id="status-loading-text">Searching Tournaments.Tech and Opencaselist…</span></div>
+  </section>
+
+  <!-- Error -->
+  <section class="status-block status-block--error" id="status-error">
+    <h2>Couldn't find that debater</h2>
+    <p id="status-error-message"></p>
+  </section>
+
+  <!-- Report -->
+  <section class="report" id="report">
+
+    <div class="report-identity">
+      <h1 id="r-name"></h1>
+      <div class="report-identity__meta">
+        <span id="r-school"></span><span class="dot" id="r-meta-dot">·</span><span id="r-event"></span>
+      </div>
+    </div>
+
+    <div class="stat-row" id="r-stat-row">
+      <div class="stat">
+        <div class="stat__value mono" id="r-record">—</div>
+        <div class="stat__label">overall record</div>
+      </div>
+      <div class="stat">
+        <div class="stat__value mono stat__value--win" id="r-winpct">—</div>
+        <div class="stat__label">win rate</div>
+      </div>
+      <div class="stat" id="r-prelim-wrap" style="display:none;">
+        <div class="stat__value mono" id="r-prelim">—</div>
+        <div class="stat__label">prelims</div>
+      </div>
+      <div class="stat" id="r-elim-wrap" style="display:none;">
+        <div class="stat__value mono" id="r-elim">—</div>
+        <div class="stat__label">elims</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <p class="section__title">MOST READ ARGUMENTS</p>
+      <div id="r-most-read"></div>
+    </div>
+
+    <div class="section">
+      <p class="section__title">WIN RATE FACING THESE ARGUMENTS</p>
+      <div id="r-vs-faced"></div>
+    </div>
+
+    <div class="section" id="r-notes-section" style="display:none;">
+      <p class="section__title">SCOUTING NOTES</p>
+      <p class="notes-summary" id="r-notes-summary"></p>
+      <p class="notes-strategy" id="r-notes-strategy"></p>
+      <span class="notes-model-tag mono" id="r-notes-model"></span>
+    </div>
+
+    <div class="section" id="r-warnings-section" style="display:none;">
+      <p class="section__title">DATA NOTES</p>
+      <div class="warnings" id="r-warnings"></div>
+    </div>
+
+    <div class="section">
+      <details class="round-log">
+        <summary>ROUND-BY-ROUND LOG (<span id="r-round-count">0</span>)</summary>
+        <table class="round-table">
+          <thead>
+            <tr>
+              <th>Tournament</th>
+              <th>Round</th>
+              <th>Side</th>
+              <th>Opponent</th>
+              <th>Argument</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody id="r-round-table-body"></tbody>
+        </table>
+      </details>
+    </div>
+
+  </section>
+
+</main>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
