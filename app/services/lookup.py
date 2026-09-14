@@ -24,6 +24,13 @@ Flow:
   5. Best-effort, capped: resolve a handful of opponents' own Opencaselist
      disclosure for the same rounds (matched the same way, by tournament +
      round name), to compute "win % facing argument X".
+  6. The `report` field from Opencaselist is NOT the argument itself -- it's
+     raw disclosure text mixing labels ("1AC", "2NR", "1NC") with case
+     names, and the meaningful part depends on which side the debater was
+     on that round. Extraction of the actual argument(s) happens via one
+     batched Groq call per debater (see argument_extraction.py) rather than
+     regex, since the free-text formatting varies too much to parse
+     reliably by hand.
 """
 from __future__ import annotations
 
@@ -35,6 +42,7 @@ from app.clients.tabroom_client import TabroomClient, clean_tournament_name
 from app.config import Settings
 from app.schemas import DebaterSummary, RoundResult
 from app.services import stats as stats_service
+from app.services.argument_extraction import extract_arguments_batch
 
 _MAX_OPPONENT_LOOKUPS = 12  # cap on "argument faced" resolution per query
 _MAX_TOURNAMENT_RESOLVE_ATTEMPTS = 5  # how many distinct tournament names to try before giving up
@@ -160,7 +168,7 @@ async def _resolve_rounds(
                 opponent=(match or {}).get("opponent") or r.get("opponent"),
                 judge=(match or {}).get("judge") or r.get("judge"),
                 result=(match or {}).get("result"),
-                argument=r.get("report"),
+                raw_report=r.get("report"),
                 source_note="opencaselist + tabroom" if match else "opencaselist only (no tabroom match)",
             )
         )
@@ -168,12 +176,21 @@ async def _resolve_rounds(
     return school_slug, rounds, diagnostics
 
 
-async def _find_opponent_argument(
+def _opposite_side(side: Optional[str]) -> Optional[str]:
+    if side == "Aff":
+        return "Neg"
+    if side == "Neg":
+        return "Aff"
+    return None
+
+
+async def _find_opponent_raw_report(
     settings: Settings, opponent_label: str, tournament: Optional[str], round_name: Optional[str]
 ) -> Optional[str]:
     """Best-effort: treat the opponent's Tabroom-style label (e.g.
     'Harvard-Westlake SL') as both a school and name guess on Opencaselist,
-    and pull whatever they disclosed for the same tournament + round."""
+    and pull whatever raw text they disclosed for the same tournament +
+    round -- extraction happens later, batched, in lookup_debater."""
     async with OpencaselistClient(
         settings.opencaselist_username, settings.opencaselist_password
     ) as oc:
@@ -218,18 +235,47 @@ async def lookup_debater(
         if any(r.result for r in rounds):
             data_sources.append("tabroom")
 
+    # --- Extract actual arguments from raw disclosure text (batched, one Groq call) ---
+    if rounds and settings.groq_api_key:
+        try:
+            extracted = await extract_arguments_batch(
+                [r.side for r in rounds],
+                [r.raw_report for r in rounds],
+                settings.groq_api_key,
+                settings.groq_model,
+            )
+            for r, args in zip(rounds, extracted):
+                r.arguments = args
+            if not any(r.arguments for r in rounds):
+                warnings.append(
+                    "Couldn't extract specific arguments from disclosure text this time -- "
+                    "argument stats may be empty even though rounds were found."
+                )
+        except Exception as exc:
+            warnings.append(f"Argument extraction failed ({exc}) -- showing record without argument stats.")
+    elif rounds and not settings.groq_api_key:
+        warnings.append("GROQ_API_KEY not configured -- skipped argument extraction (no argument stats).")
+
     overall_record, win_pct = stats_service.compute_overall_record(rounds)
     most_read, by_win_pct = stats_service.compute_argument_stats(rounds)
 
     # --- Best effort, capped: argument-faced win rates ---
     faced_pairs: List[Tuple[str, Optional[str]]] = []
     rounds_with_opponents = [r for r in rounds if r.opponent and r.result][:_MAX_OPPONENT_LOOKUPS]
-    if rounds_with_opponents:
+    if rounds_with_opponents and settings.groq_api_key:
         try:
+            opponent_sides = [_opposite_side(r.side) for r in rounds_with_opponents]
+            opponent_reports = []
             for r in rounds_with_opponents:
-                opp_argument = await _find_opponent_argument(settings, r.opponent or "", r.tournament, r.round_name)
-                if opp_argument:
-                    faced_pairs.append((opp_argument, r.result))
+                raw = await _find_opponent_raw_report(settings, r.opponent or "", r.tournament, r.round_name)
+                opponent_reports.append(raw)
+
+            extracted_opponent_args = await extract_arguments_batch(
+                opponent_sides, opponent_reports, settings.groq_api_key, settings.groq_model
+            )
+            for r, args in zip(rounds_with_opponents, extracted_opponent_args):
+                for arg in args:
+                    faced_pairs.append((arg, r.result))
         except Exception:
             warnings.append("Couldn't resolve opponents' disclosures for argument-faced stats this time.")
 

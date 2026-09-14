@@ -197,7 +197,7 @@
         "<td>" + escapeHtml(r.round_name || "—") + "</td>" +
         "<td>" + escapeHtml(r.side || "—") + "</td>" +
         "<td>" + escapeHtml(r.opponent || "—") + "</td>" +
-        "<td>" + escapeHtml(r.argument || "—") + "</td>" +
+        "<td>" + escapeHtml((r.arguments && r.arguments.length) ? r.arguments.join(", ") : "—") + "</td>" +
         "<td><span class=\"result-tag " + resultClass + "\">" + escapeHtml(resultText) + "</span></td>";
       el.rRoundTableBody.appendChild(tr);
     });

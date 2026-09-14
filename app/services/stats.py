@@ -85,20 +85,22 @@ def cluster_arguments(raw_names: List[str]) -> Dict[str, str]:
 
 def compute_argument_stats(rounds: List[RoundResult]) -> Tuple[List[ArgumentStat], List[ArgumentStat]]:
     """Returns (most_read_arguments, win_pct_by_argument_read), both sorted
-    descending by times_read."""
-    disclosed = [r for r in rounds if r.argument]
-    if not disclosed:
+    descending by times_read. A round with multiple extended arguments
+    (e.g. a 2NR going for "AI DA, Ballot CP, T-Framework") contributes to
+    each of those tags separately, all sharing that round's result."""
+    pairs = [(arg, r.result) for r in rounds for arg in r.arguments if arg]
+    if not pairs:
         return [], []
 
-    label_map = cluster_arguments([r.argument for r in disclosed])  # type: ignore[arg-type]
+    label_map = cluster_arguments([a for a, _ in pairs])
 
     tally: Dict[str, Dict[str, int]] = defaultdict(lambda: {"read": 0, "win": 0, "loss": 0})
-    for r in disclosed:
-        label = label_map[r.argument]  # type: ignore[index]
+    for arg, result in pairs:
+        label = label_map[arg]
         tally[label]["read"] += 1
-        if r.result == "Win":
+        if result == "Win":
             tally[label]["win"] += 1
-        elif r.result == "Loss":
+        elif result == "Loss":
             tally[label]["loss"] += 1
 
     stats: List[ArgumentStat] = []

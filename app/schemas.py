@@ -12,8 +12,8 @@ class RoundResult(BaseModel):
     opponent: Optional[str] = None
     judge: Optional[str] = None
     result: Optional[str] = None        # "Win" / "Loss" / "Bye" / None if unknown
-    argument: Optional[str] = None      # disclosed case/position name, if we found one
-    tourn_id: Optional[int] = None
+    arguments: List[str] = []           # extracted argument(s) actually read/extended this round
+    raw_report: Optional[str] = None    # the raw Opencaselist disclosure text, before extraction
     source_note: Optional[str] = None   # brief provenance, e.g. "opencaselist + tabroom"
 
 
