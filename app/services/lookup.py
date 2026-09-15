@@ -112,6 +112,37 @@ async def _resolve_rounds(
             )
             return school_slug, rounds, diagnostics
 
+    # Opencaselist wiki pages often have a "00---Contact Info" pseudo-round
+    # at the top for listing team contact info -- not a real competition
+    # round. Filter these out before they waste a tournament-resolution
+    # attempt or pollute the round log. Recognized by tournament name
+    # containing "contact info", or the structural marker seen on real
+    # examples: opponent/judge both literally "Cites".
+    def _is_real_round(r: Dict[str, Any]) -> bool:
+        tourn = (r.get("tournament") or "").lower()
+        if "contact info" in tourn:
+            return False
+        if r.get("opponent") == "Cites" and r.get("judge") == "Cites":
+            return False
+        return True
+
+    oc_rounds = [r for r in oc_rounds if _is_real_round(r)]
+    if not oc_rounds:
+        diagnostics.append(
+            f"Found the team at '{school_slug}' on Opencaselist, but every disclosed entry was a "
+            f"non-round placeholder (e.g. a contact-info page), not an actual competition round."
+        )
+        return school_slug, rounds, diagnostics
+
+    # A canonical name straight from Opencaselist's own team record is
+    # often more reliable for matching Tabroom's entry list than whatever
+    # the user typed (different capitalization, nicknames, etc.) -- try
+    # both, since either could be the one that actually matches.
+    name_candidates = [debater_name]
+    canonical_name = " ".join(filter(None, [team.get("debater1_first"), team.get("debater1_last")])).strip()
+    if canonical_name and canonical_name.lower() != debater_name.strip().lower():
+        name_candidates.append(canonical_name)
+
     # Distinct tournament names, in the order they appear, to try resolving
     # against Tabroom -- we only need ONE to succeed, since team_results
     # gives us the whole season once we have an entry id.
@@ -123,25 +154,43 @@ async def _resolve_rounds(
 
     tabroom_rounds: List[Dict[str, Any]] = []
     entry_id: Optional[int] = None
+    attempt_log: List[str] = []
     async with TabroomClient(settings.tabroom_username, settings.tabroom_password) as tb:
+        if not tb.authenticated:
+            diagnostics.append(
+                "Tabroom login didn't return an auth cookie -- check TABROOM_USERNAME/TABROOM_PASSWORD "
+                "(this alone would make every tournament-resolution attempt below fail)."
+            )
+
         for tourn_name in distinct_tournaments[:_MAX_TOURNAMENT_RESOLVE_ATTEMPTS]:
+            clean = clean_tournament_name(tourn_name)
             tourn_id = await tb.search_tournament(tourn_name)
             if not tourn_id:
+                attempt_log.append(f"'{clean}': no matching tournament found via Tabroom search")
                 continue
-            found_id = await tb.find_entry_id(tourn_id, school_slug, debater_name)
+
+            found_id = None
+            for name_candidate in name_candidates:
+                found_id = await tb.find_entry_id(tourn_id, school_slug, name_candidate)
+                if found_id:
+                    break
+
             if found_id:
                 entry_id = found_id
                 break
+            else:
+                tried_names = " / ".join(f"'{n}'" for n in name_candidates)
+                attempt_log.append(
+                    f"'{clean}': found tourn_id={tourn_id}, but no entry row at school='{school_slug}' "
+                    f"matched name {tried_names}"
+                )
 
         if entry_id:
             tabroom_rounds = await tb.get_season_rounds(entry_id)
         else:
-            tried = ", ".join(clean_tournament_name(t) for t in distinct_tournaments[:3])
-            more = "..." if len(distinct_tournaments) > 3 else ""
             diagnostics.append(
-                f"Found {len(oc_rounds)} disclosed round(s) on Opencaselist, but couldn't match "
-                f"any of this debater's tournaments ({tried}{more}) to a Tabroom entry -- "
-                f"tournament-name search on Tabroom may need adjusting (see tabroom_client.py)."
+                f"Found {len(oc_rounds)} disclosed round(s) on Opencaselist, but couldn't resolve a "
+                f"Tabroom entry: " + "; ".join(attempt_log)
             )
 
     # Join: Opencaselist round (has the argument) + Tabroom round (has the result)
