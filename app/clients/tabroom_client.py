@@ -181,15 +181,64 @@ class TabroomClient:
         Scrape a tournament's entries list (fields.mhtml -- confirmed real,
         static HTML) for the row matching this school + debater, and pull
         their persistent entry id (`id1`) off the "view record" link.
+
+        Confirmed against a real tournament: `fields.mhtml?tourn_id=X`
+        ALONE is just a landing page listing that tournament's events as
+        links (e.g. "Varsity LD", "Lincoln Douglas Round Robin") -- it does
+        NOT show an entries table until you also pass that event's
+        `event_id`. A tournament can have more than one LD-flavored event
+        (as seen: both "Lincoln Douglas Round Robin" AND "Varsity LD" on
+        the same tournament), so rather than guess which one a given
+        debater is in, this discovers every LD-relevant event_id from the
+        landing page and tries each in turn.
         """
         assert self._client is not None
-        resp = await self._client.get(
+
+        landing_resp = await self._client.get(
             f"{SITE_BASE_URL}/index/tourn/fields.mhtml", params={"tourn_id": tourn_id}
         )
-        if resp.status_code != 200:
+        if landing_resp.status_code != 200:
             return None
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+        landing_soup = BeautifulSoup(landing_resp.text, "html.parser")
+        event_ids: List[int] = []
+        for link in landing_soup.find_all("a", href=True):
+            if "event_id=" not in link["href"]:
+                continue
+            link_text = link.get_text(strip=True).lower()
+            if "lincoln douglas" in link_text or re.search(r"\bld\b", link_text):
+                qs = parse_qs(urlparse(link["href"]).query)
+                event_id_str = qs.get("event_id", [None])[0]
+                if event_id_str:
+                    event_ids.append(int(event_id_str))
+
+        if not event_ids:
+            # No event links found at all -- maybe this page format doesn't
+            # require event_id for this tournament, so fall back to trying
+            # the landing page's own HTML directly (covers the case where
+            # fields.mhtml did return a full table without needing one).
+            found = self._find_entry_row(landing_resp.text, school, debater_name)
+            return found
+
+        for event_id in event_ids:
+            resp = await self._client.get(
+                f"{SITE_BASE_URL}/index/tourn/fields.mhtml",
+                params={"tourn_id": tourn_id, "event_id": event_id},
+            )
+            if resp.status_code != 200:
+                continue
+            found = self._find_entry_row(resp.text, school, debater_name)
+            if found:
+                return found
+
+        return None
+
+    @staticmethod
+    def _find_entry_row(html: str, school: str, debater_name: str) -> Optional[int]:
+        """Parse an entries table (real fields.mhtml?tourn_id=X&event_id=Y
+        response) for the row matching school + debater, returning their
+        persistent entry id (id1) off the "view record" link."""
+        soup = BeautifulSoup(html, "html.parser")
         school_norm = school.strip().lower()
         name_norm = debater_name.strip().lower()
 
