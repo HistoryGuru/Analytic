@@ -85,6 +85,25 @@ async def main():
             if found_id:
                 entry_id = found_id
                 break
+            else:
+                # Dump the raw page so we can see what staging's fields.mhtml
+                # actually looks like, rather than guessing a third time --
+                # every prior screenshot of this page was from production,
+                # not staging, and the two may not match structurally.
+                from app.clients.tabroom_client import SITE_BASE_URL
+                assert tb._client is not None
+                raw_resp = await tb._client.get(
+                    f"{SITE_BASE_URL}/index/tourn/fields.mhtml", params={"tourn_id": tourn_id}
+                )
+                out_path = f"tabroom_debug_fields_{tourn_id}.html"
+                with open(out_path, "w", encoding="utf-8") as f:
+                    f.write(raw_resp.text)
+                print(f"  Saved raw fields.mhtml response ({len(raw_resp.text)} chars) to {out_path}")
+                print(f"  Status: {raw_resp.status_code}")
+                print(f"  Contains {args.name!r}: {args.name in raw_resp.text}")
+                print(f"  Contains {school_slug!r}: {school_slug in raw_resp.text}")
+                print(f"  Number of <table> tags: {raw_resp.text.lower().count('<table')}")
+                print(f"  Number of <tr tags: {raw_resp.text.lower().count('<tr')}")
 
         if not entry_id:
             print("\nNo entry_id resolved -- stopping here. The per-step output above shows "
