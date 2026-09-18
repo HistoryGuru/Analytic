@@ -151,6 +151,24 @@ async def main():
             print(f"  Contains 'Decision': {'Decision' in raw_resp.text}")
             print(f"  Contains 'Loyola': {'Loyola' in raw_resp.text}")
 
+            # 11 <table> tags but almost no <tr>/<td>/<th> strongly suggests
+            # those aren't real HTML tables at all -- likely React
+            # components styled to look like tables. The actual data is
+            # probably embedded as JSON inside a <script> tag instead
+            # (consistent with the data-reactid attributes seen earlier,
+            # a marker of old-style React server-rendering that typically
+            # ships its initial data as inline JSON for hydration).
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(raw_resp.text, "html.parser")
+            scripts = soup.find_all("script")
+            print(f"\n  Found {len(scripts)} <script> tag(s). Checking each for round-like data...")
+            for i, script in enumerate(scripts):
+                content = script.string or ""
+                if "Opponent" in content or "Decision" in content or "Loyola" in content:
+                    print(f"\n  --- Script #{i} ({len(content)} chars) looks relevant ---")
+                    print(content[:3000])
+                    print("  --- end snippet ---")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
