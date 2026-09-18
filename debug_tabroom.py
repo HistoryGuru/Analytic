@@ -105,6 +105,18 @@ async def main():
                 print(f"  Number of <table> tags: {raw_resp.text.lower().count('<table')}")
                 print(f"  Number of <tr tags: {raw_resp.text.lower().count('<tr')}")
 
+                # fields.mhtml?tourn_id=X alone can be a landing page that
+                # just lists available events/divisions as links, requiring
+                # you to pick one before it shows an actual entries table.
+                # Print every link on the page so we can see the real
+                # parameter name/format for selecting an event.
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(raw_resp.text, "html.parser")
+                event_links = [a for a in soup.find_all("a", href=True) if "fields.mhtml" in a["href"]]
+                print(f"  Found {len(event_links)} link(s) containing 'fields.mhtml':")
+                for a in event_links:
+                    print(f"    {a.get_text(strip=True)!r} -> {a['href']}")
+
         if not entry_id:
             print("\nNo entry_id resolved -- stopping here. The per-step output above shows "
                   "exactly which call returned nothing.")
