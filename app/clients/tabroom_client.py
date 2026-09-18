@@ -8,18 +8,35 @@ server-rendered HTML with no JavaScript/XHR involved -- confirmed by
 checking the Network tab while the page "expanded" a section and seeing
 zero new requests fire:
 
-1. GET /index/tourn/fields.mhtml?tourn_id={tourn_id}
-   The tournament's entry list. A completely ordinary HTML table:
-   <tr role="row" class="odd">
-     <td>{institution}</td><td class="centeralign">{location}</td>
-     <td>{entry name}</td><td>{code}</td><td class="centeralign">{status}</td>
-     <td class="centeralign">
-       <a class="buttonwhite greentext fa fa-table fa-sm" target="_blank"
-          href="index/results/team_results.mhtml?id1={id1}&id2=">
-     </td>
-   </tr>
+1. GET /index/tourn/fields.mhtml?tourn_id={tourn_id}&event_id={event_id}
+   The tournament's entry list FOR ONE EVENT -- both params are required;
+   tourn_id alone is just a landing page listing that tournament's events
+   as links (confirmed: a tournament can have more than one LD-flavored
+   event, e.g. both "Lincoln Douglas Round Robin" and "Varsity LD" on the
+   same tournament -- search_tournament()/find_entry_id() try each).
+   Once event_id is included, it's a completely ordinary HTML table:
+     <tr class="odd"> (or similar -- see caveat below)
+       <td>{institution}</td><td class="centeralign">{location}</td>
+       <td>{entry name}</td><td>{code}</td><td class="centeralign">{status}</td>
+       <td class="centeralign">
+         <a class="buttonwhite greentext fa fa-table fa-sm" target="_blank"
+            href="index/results/team_results.mhtml?id1={id1}&id2=">
+       </td>
+     </tr>
    `id1` is the entry's persistent Tabroom ID -- the same one shows up on
    every tournament that entry competes in.
+
+   *** CAVEAT: the `role="row"` attribute shown in early screenshots was
+   captured via Chrome DevTools' live DOM inspector, which reflects the
+   page AFTER JavaScript runs -- confirmed (the hard way) that this
+   attribute does not necessarily exist in the raw HTML this scraper
+   actually receives. _find_entry_row() matches on plain <tr> now, not
+   that attribute. ***
+
+   Also confirmed: Tabroom's server remembers the last-selected event_id
+   PER SESSION -- after fetching one event_id successfully, a subsequent
+   bare tourn_id-only request can return that same event's table too.
+   Don't rely on this; always pass event_id explicitly.
 
 2. GET /index/results/team_results.mhtml?id1={id1}&id2=
    Given just that one id1, this returns the entry's FULL CURRENT SEASON
@@ -237,12 +254,21 @@ class TabroomClient:
     def _find_entry_row(html: str, school: str, debater_name: str) -> Optional[int]:
         """Parse an entries table (real fields.mhtml?tourn_id=X&event_id=Y
         response) for the row matching school + debater, returning their
-        persistent entry id (id1) off the "view record" link."""
+        persistent entry id (id1) off the "view record" link.
+
+        Iterates every <tr> with no attribute filter -- an earlier version
+        selected only `tr[role="row"]`, a selector copied from Chrome
+        DevTools' live DOM inspector, which reflects the page AFTER
+        JavaScript runs. That attribute may only get added client-side
+        (common with table libraries) and might not exist in the raw HTML
+        this scraper actually receives, which would make the row genuinely
+        present in the response but invisible to that selector.
+        """
         soup = BeautifulSoup(html, "html.parser")
         school_norm = school.strip().lower()
         name_norm = debater_name.strip().lower()
 
-        for row in soup.select("tr[role='row']"):
+        for row in soup.find_all("tr"):
             cells = row.find_all("td")
             if len(cells) < 4:
                 continue
