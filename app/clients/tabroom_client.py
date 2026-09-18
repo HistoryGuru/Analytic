@@ -82,13 +82,44 @@ class TabroomClient:
             await self._client.aclose()
 
     async def _login(self) -> None:
+        """
+        Confirmed against the real login form's HTML (fetched fresh from
+        the homepage, where the login widget lives): it includes hidden
+        `salt` and `sha` fields alongside `username`/`password` that must
+        be echoed back unchanged -- almost certainly a CSRF/replay guard.
+        Omitting them (the previous version of this method did) causes
+        the login to silently fail with no error, just a normal-looking
+        redirect.
+
+        Also: staging's session cookie is named `TabroomStaging`, NOT
+        `TabroomToken` (that name is production's). Checking only for
+        `TabroomToken` made every staging login look failed even when it
+        may have actually succeeded.
+        """
         assert self._client is not None
-        resp = await self._client.post(
-            f"{SITE_BASE_URL}/user/login/login_save.mhtml",
-            data={"username": self.username, "password": self.password},
-        )
+
+        login_page = await self._client.get(f"{SITE_BASE_URL}/")
+        soup = BeautifulSoup(login_page.text, "html.parser")
+
+        salt = sha = None
+        for form in soup.find_all("form"):
+            if form.get("action") == "/user/login/login_save.mhtml":
+                salt_input = form.find("input", {"name": "salt"})
+                sha_input = form.find("input", {"name": "sha"})
+                salt = salt_input.get("value") if salt_input else None
+                sha = sha_input.get("value") if sha_input else None
+                break
+
+        data = {"username": self.username, "password": self.password}
+        if salt and sha:
+            data["salt"] = salt
+            data["sha"] = sha
+
+        resp = await self._client.post(f"{SITE_BASE_URL}/user/login/login_save.mhtml", data=data)
         resp.raise_for_status()
-        self._authenticated = "TabroomToken" in self._client.cookies
+        self._authenticated = any(
+            name in self._client.cookies for name in ("TabroomToken", "TabroomStaging")
+        )
 
     @property
     def authenticated(self) -> bool:
