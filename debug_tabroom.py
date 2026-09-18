@@ -128,6 +128,29 @@ async def main():
         for r in season_rounds:
             print(f"  {r}")
 
+        if not season_rounds:
+            # Same principle as Step 3: don't guess a third time on this
+            # page, look at the raw response directly.
+            from app.clients.tabroom_client import SITE_BASE_URL
+            assert tb._client is not None
+            raw_resp = await tb._client.get(
+                f"{SITE_BASE_URL}/index/results/team_results.mhtml",
+                params={"id1": entry_id, "id2": ""},
+            )
+            out_path = f"tabroom_debug_team_results_{entry_id}.html"
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write(raw_resp.text)
+            print(f"\n  Saved raw team_results.mhtml response ({len(raw_resp.text)} chars) to {out_path}")
+            print(f"  Status: {raw_resp.status_code}")
+            print(f"  Number of <table> tags: {raw_resp.text.lower().count('<table')}")
+            print(f"  Number of <th tags: {raw_resp.text.lower().count('<th')}")
+            print(f"  Number of <td tags: {raw_resp.text.lower().count('<td')}")
+            print(f"  Number of <tr tags: {raw_resp.text.lower().count('<tr')}")
+            print(f"  Contains 'Round': {'Round' in raw_resp.text}")
+            print(f"  Contains 'Opponent': {'Opponent' in raw_resp.text}")
+            print(f"  Contains 'Decision': {'Decision' in raw_resp.text}")
+            print(f"  Contains 'Loyola': {'Loyola' in raw_resp.text}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())
