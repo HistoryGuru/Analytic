@@ -128,30 +128,37 @@ async def main():
         for r in season_rounds:
             print(f"  {r}")
 
-        # Panel (multi-judge) elimination rounds are the one thing not yet
-        # verified -- normalized results for "Quar"/"Semi" above look wrong
-        # compared to the known-real screenshot (WLW/LWW, both actually
-        # wins by majority, but normalized to "Loss"). Print the RAW,
-        # un-normalized dict for elim rounds so we can see decision_str's
-        # real value/format instead of guessing again.
-        from app.clients.tabroom_client import SITE_BASE_URL, _extract_round_data_object
+        # Panel (multi-judge) elimination rounds were one thing verified
+        # already (fixed: now uses ballots_won/lost, not decision_str
+        # character position). This section now checks a DIFFERENT thing:
+        # whether merging every <script>'s data recovers tournaments that
+        # a single-best-object approach was silently dropping.
+        from app.clients.tabroom_client import SITE_BASE_URL, _extract_round_data_objects
         from bs4 import BeautifulSoup as _BS
         assert tb._client is not None
         raw_resp = await tb._client.get(
             f"{SITE_BASE_URL}/index/results/team_results.mhtml", params={"id1": entry_id, "id2": ""}
         )
         soup = _BS(raw_resp.text, "html.parser")
+        merged: dict = {}
         for script in soup.find_all("script"):
             content = script.string or ""
-            round_map = _extract_round_data_object(content)
-            if round_map:
-                print("\n  Raw (un-normalized) data for elimination rounds:")
-                for round_id, data in round_map.items():
-                    if isinstance(data, dict) and str(data.get("round_label") or data.get("round_name")) not in (
-                        "1", "2", "3", "4", "5", "6", "None",
-                    ):
-                        print(f"    round_id={round_id}: {data}")
-                break
+            merged.update(_extract_round_data_objects(content))
+
+        print(f"\n  Merged across all scripts: {len(merged)} total round entries found")
+        tourns_seen = {}
+        for round_id, data in merged.items():
+            if isinstance(data, dict) and "opponent" in data:
+                t = data.get("tourn")
+                tourns_seen[t] = tourns_seen.get(t, 0) + 1
+        print(f"  Tournaments represented in merged data: {tourns_seen}")
+
+        print("\n  Raw (un-normalized) data for elimination rounds:")
+        for round_id, data in merged.items():
+            if isinstance(data, dict) and str(data.get("round_label") or data.get("round_name")) not in (
+                "1", "2", "3", "4", "5", "6", "None",
+            ):
+                print(f"    round_id={round_id}: {data}")
 
         if not season_rounds:
             # Same principle as Step 3: don't guess a third time on this

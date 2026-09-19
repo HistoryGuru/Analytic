@@ -82,10 +82,10 @@ def clean_tournament_name(name: str) -> str:
     return _OC_TOURNAMENT_PREFIX_RE.sub("", name).strip()
 
 
-def _extract_round_data_object(script_text: str) -> Optional[Dict[str, Any]]:
+def _extract_round_data_objects(script_text: str) -> Dict[str, Any]:
     """
-    team_results.mhtml's round-by-round data is embedded as a JSON object
-    literal directly inside a <script> tag (round_id -> round data),
+    team_results.mhtml's round-by-round data is embedded as JSON object
+    literal(s) directly inside a <script> tag (round_id -> round data),
     rendered client-side by React rather than existing as real HTML table
     markup. This scans for '{"' (a '{' immediately followed by a quote --
     cheap filter that also skips the countless non-JSON JSX braces in the
@@ -103,11 +103,20 @@ def _extract_round_data_object(script_text: str) -> Optional[Dict[str, Any]]:
     value (a dict containing "opponent") -- real data mixes in stray keys
     (bye rounds with no opponent, counts, etc.), so an "every value must
     match" filter rejects the correct object outright over a single
-    mismatched entry. Among all matches, returns whichever object has the
-    MOST round-shaped values, to avoid a small incidental object winning
-    by coincidence.
+    mismatched entry.
+
+    MERGES every qualifying object found, rather than keeping only the
+    single best-scoring one -- confirmed on real data that a debater with
+    multiple tournaments this season can have their rounds split across
+    more than one embedded object (the page's own JSX code references
+    separate named containers like "tourney_detail_together_this_yr" vs
+    "tourney_detail_speaker1_this_yr"), and taking only the top-scoring
+    candidate silently dropped an entire tournament's rounds. Merging by
+    round_id key is safe even if the same round appears in more than one
+    object (e.g. a "team together" view and an individual view overlap) --
+    duplicate keys just overwrite with equivalent data, not double-count.
     """
-    candidates: List[Dict[str, Any]] = []
+    merged: Dict[str, Any] = {}
     n = len(script_text)
     i = 0
     while i < n:
@@ -150,16 +159,13 @@ def _extract_round_data_object(script_text: str) -> Optional[Dict[str, Any]]:
             except (ValueError, json.JSONDecodeError):
                 obj = None
             if isinstance(obj, dict) and obj:
-                round_like = sum(1 for v in obj.values() if isinstance(v, dict) and "opponent" in v)
+                round_like = {k: v for k, v in obj.items() if isinstance(v, dict) and "opponent" in v}
                 if round_like:
-                    candidates.append((round_like, obj))
+                    merged.update(round_like)
 
         i += 1
 
-    if not candidates:
-        return None
-    candidates.sort(key=lambda pair: pair[0], reverse=True)
-    return candidates[0][1]
+    return merged
 
 
 def _normalize_embedded_round(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -427,19 +433,30 @@ class TabroomClient:
         CONFIRMED (the hard way -- an earlier version of this method tried
         to scrape rendered HTML tables, which don't really exist server-
         side): this page's round-by-round data is actually built entirely
-        client-side by React from an embedded JSON object sitting inside a
-        <script> tag, e.g.:
+        client-side by React from embedded JSON object(s) sitting inside
+        <script> tags, e.g.:
 
             "9067179": {"decision_str": "W", "opponent": "Harvard-Westlake SL",
                         "judge_raw": "Martinez, David ", "round_name": 1,
                         "side": "Aff", "tourn": "Loyola Invitational",
-                        "tourn_id": 40342, "event_name": "Varsity LD", ...}
+                        "tourn_id": 40342, "event_name": "Varsity LD",
+                        "this_yr": 1, ...}
 
         keyed by round_id, mapping round_id -> round data. This is
         genuinely more reliable than scraping a rendered table would have
         been -- clean field names, no HTML entity/whitespace cleanup
-        needed. _extract_round_data() finds and parses that object
-        directly rather than looking for table markup.
+        needed. _extract_round_data_objects() finds and merges every such
+        object across every <script> tag (confirmed: a multi-tournament
+        season can have its rounds split across more than one embedded
+        object, so checking only one script or keeping only one candidate
+        object silently dropped whole tournaments).
+
+        Filters out anything with this_yr explicitly 0/false -- the page
+        has a "Show Prior Seasons" toggle, meaning older seasons' rounds
+        can be embedded in the same page too, and this_yr is the field
+        that distinguishes them. Missing this_yr is treated as current
+        (don't over-filter on an assumption), only an explicit falsy value
+        excludes a round.
         """
         assert self._client is not None
         resp = await self._client.get(
@@ -450,17 +467,20 @@ class TabroomClient:
             return []
 
         soup = BeautifulSoup(resp.text, "html.parser")
-        rounds: List[Dict[str, Any]] = []
+        merged: Dict[str, Any] = {}
 
         for script in soup.find_all("script"):
             content = script.string or ""
             if "opponent" not in content or "decision_str" not in content:
                 continue
-            round_map = _extract_round_data_object(content)
-            if round_map:
-                for round_id, data in round_map.items():
-                    if isinstance(data, dict) and "opponent" in data:
-                        rounds.append(_normalize_embedded_round(data))
-                break  # found the real data object, no need to check other scripts
+            merged.update(_extract_round_data_objects(content))
+
+        rounds: List[Dict[str, Any]] = []
+        for round_id, data in merged.items():
+            if not isinstance(data, dict) or "opponent" not in data:
+                continue
+            if data.get("this_yr", 1) in (0, False):
+                continue
+            rounds.append(_normalize_embedded_round(data))
 
         return rounds
