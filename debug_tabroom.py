@@ -161,13 +161,29 @@ async def main():
             from bs4 import BeautifulSoup
             soup = BeautifulSoup(raw_resp.text, "html.parser")
             scripts = soup.find_all("script")
-            print(f"\n  Found {len(scripts)} <script> tag(s). Checking each for round-like data...")
+            print(f"\n  Found {len(scripts)} <script> tag(s). Previewing each:")
             for i, script in enumerate(scripts):
                 content = script.string or ""
-                if "Opponent" in content or "Decision" in content or "Loyola" in content:
-                    print(f"\n  --- Script #{i} ({len(content)} chars) looks relevant ---")
-                    print(content[:3000])
-                    print("  --- end snippet ---")
+                preview = content[:150].replace("\n", " ")
+                print(f"    Script #{i}: {len(content)} chars -- {preview!r}")
+
+            # Script #6 (component definitions) contains "Opponent" only as
+            # a column-header LABEL, not per-round data -- search all
+            # scripts for a real opponent name we already know exists for
+            # this debater (from Opencaselist's own disclosure), which
+            # should pinpoint whichever script actually holds the data
+            # object, wherever it is.
+            known_opponents = ["Harvard-Westlake", "Jericho", "Peninsula", "BASIS", "Immaculate Heart", "Dougherty Valley"]
+            print(f"\n  Searching all scripts for known opponent names {known_opponents}...")
+            for i, script in enumerate(scripts):
+                content = script.string or ""
+                hits = [name for name in known_opponents if name in content]
+                if hits:
+                    print(f"\n  --- Script #{i} contains real opponent name(s): {hits} ---")
+                    idx = content.find(hits[0])
+                    print(f"  Context around {hits[0]!r}:")
+                    print("  " + content[max(0, idx - 300):idx + 300].replace("\n", " "))
+                    print("  --- end context ---")
 
 
 if __name__ == "__main__":
