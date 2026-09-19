@@ -87,23 +87,31 @@ def _extract_round_data_object(script_text: str) -> Optional[Dict[str, Any]]:
     team_results.mhtml's round-by-round data is embedded as a JSON object
     literal directly inside a <script> tag (round_id -> round data),
     rendered client-side by React rather than existing as real HTML table
-    markup. This scans for '{' characters and, at each one, extracts a
-    balanced substring (tracking string literals so braces inside quoted
-    values don't throw off the count) and tries to parse it as JSON.
+    markup. This scans for '{"' (a '{' immediately followed by a quote --
+    cheap filter that also skips the countless non-JSON JSX braces in the
+    same script, e.g. `{stuff.props.txt_val}`, which never start with a
+    quote) and, at each one, extracts a balanced substring (tracking
+    string literals so braces inside quoted values don't throw off the
+    count) and tries to parse it as JSON.
 
     Confirmed real values use double-quoted JSON-compatible syntax (not
     single-quoted JS object shorthand), so plain json.loads works once the
     correct boundaries are found -- no JS-specific parsing needed.
 
-    Returns the first successfully-parsed dict whose values all look like
-    round records (each is itself a dict containing an "opponent" key),
-    which distinguishes the real data object from small incidental dicts
-    elsewhere in the same script (JSX prop objects, etc.).
+    Rather than requiring EVERY value in a candidate object to look like a
+    round record, this looks for objects with AT LEAST ONE round-shaped
+    value (a dict containing "opponent") -- real data mixes in stray keys
+    (bye rounds with no opponent, counts, etc.), so an "every value must
+    match" filter rejects the correct object outright over a single
+    mismatched entry. Among all matches, returns whichever object has the
+    MOST round-shaped values, to avoid a small incidental object winning
+    by coincidence.
     """
+    candidates: List[Dict[str, Any]] = []
     n = len(script_text)
     i = 0
     while i < n:
-        if script_text[i] != "{":
+        if script_text[i] != "{" or i + 1 >= n or script_text[i + 1] != '"':
             i += 1
             continue
 
@@ -141,16 +149,17 @@ def _extract_round_data_object(script_text: str) -> Optional[Dict[str, Any]]:
                 obj = json.loads(candidate)
             except (ValueError, json.JSONDecodeError):
                 obj = None
-            if (
-                isinstance(obj, dict)
-                and obj
-                and all(isinstance(v, dict) and "opponent" in v for v in obj.values())
-            ):
-                return obj
+            if isinstance(obj, dict) and obj:
+                round_like = sum(1 for v in obj.values() if isinstance(v, dict) and "opponent" in v)
+                if round_like:
+                    candidates.append((round_like, obj))
 
         i += 1
 
-    return None
+    if not candidates:
+        return None
+    candidates.sort(key=lambda pair: pair[0], reverse=True)
+    return candidates[0][1]
 
 
 def _normalize_embedded_round(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -418,7 +427,8 @@ class TabroomClient:
             round_map = _extract_round_data_object(content)
             if round_map:
                 for round_id, data in round_map.items():
-                    rounds.append(_normalize_embedded_round(data))
+                    if isinstance(data, dict) and "opponent" in data:
+                        rounds.append(_normalize_embedded_round(data))
                 break  # found the real data object, no need to check other scripts
 
         return rounds
