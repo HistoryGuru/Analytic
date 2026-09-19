@@ -62,6 +62,7 @@ to stay within their bot-usage policy.
    Douglas"/"LD", and whether the Date falls in the target season, rather
    than just taking the first result.
 """
+import json
 import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import parse_qs, urlparse
@@ -79,6 +80,98 @@ _OC_TOURNAMENT_PREFIX_RE = re.compile(r"^\d+-+")
 
 def clean_tournament_name(name: str) -> str:
     return _OC_TOURNAMENT_PREFIX_RE.sub("", name).strip()
+
+
+def _extract_round_data_object(script_text: str) -> Optional[Dict[str, Any]]:
+    """
+    team_results.mhtml's round-by-round data is embedded as a JSON object
+    literal directly inside a <script> tag (round_id -> round data),
+    rendered client-side by React rather than existing as real HTML table
+    markup. This scans for '{' characters and, at each one, extracts a
+    balanced substring (tracking string literals so braces inside quoted
+    values don't throw off the count) and tries to parse it as JSON.
+
+    Confirmed real values use double-quoted JSON-compatible syntax (not
+    single-quoted JS object shorthand), so plain json.loads works once the
+    correct boundaries are found -- no JS-specific parsing needed.
+
+    Returns the first successfully-parsed dict whose values all look like
+    round records (each is itself a dict containing an "opponent" key),
+    which distinguishes the real data object from small incidental dicts
+    elsewhere in the same script (JSX prop objects, etc.).
+    """
+    n = len(script_text)
+    i = 0
+    while i < n:
+        if script_text[i] != "{":
+            i += 1
+            continue
+
+        depth = 0
+        in_string = False
+        escape = False
+        string_char = ""
+        j = i
+        closed_at = None
+        while j < n:
+            c = script_text[j]
+            if in_string:
+                if escape:
+                    escape = False
+                elif c == "\\":
+                    escape = True
+                elif c == string_char:
+                    in_string = False
+            else:
+                if c == '"' or c == "'":
+                    in_string = True
+                    string_char = c
+                elif c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        closed_at = j
+                        break
+            j += 1
+
+        if closed_at is not None:
+            candidate = script_text[i : closed_at + 1]
+            try:
+                obj = json.loads(candidate)
+            except (ValueError, json.JSONDecodeError):
+                obj = None
+            if (
+                isinstance(obj, dict)
+                and obj
+                and all(isinstance(v, dict) and "opponent" in v for v in obj.values())
+            ):
+                return obj
+
+        i += 1
+
+    return None
+
+
+def _normalize_embedded_round(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Map the embedded JSON round record's field names onto the plain
+    dict shape the rest of this app expects."""
+    decision_raw = str(data.get("decision_str") or "").strip().lower()
+    result = _RESULT_MAP.get(decision_raw[:1]) if decision_raw else None
+
+    round_label = data.get("round_label")
+    round_name = data.get("round_name")
+    round_display = str(round_label if round_label not in (None, "") else round_name or "")
+
+    return {
+        "tournament": data.get("tourn"),
+        "round": round_display,
+        "side": data.get("side"),
+        "opponent": data.get("opponent"),
+        "judge": data.get("judge_raw") or data.get("judge"),
+        "result": result,
+        "event_name": data.get("event_name"),
+    }
 
 
 class TabroomClient:
@@ -289,12 +382,23 @@ class TabroomClient:
         """
         Fetch this entry's ENTIRE current season in one request --
         team_results.mhtml?id1=... covers every tournament, not just one.
-        Confirmed real (server-rendered, data-reactid-tagged but still
-        plain parseable HTML -- no separate XHR call backs it).
 
-        Returns a flat list of round dicts:
-            {"tournament": ..., "round": ..., "side": ..., "opponent": ...,
-             "judge": ..., "result": "Win"|"Loss"|None}
+        CONFIRMED (the hard way -- an earlier version of this method tried
+        to scrape rendered HTML tables, which don't really exist server-
+        side): this page's round-by-round data is actually built entirely
+        client-side by React from an embedded JSON object sitting inside a
+        <script> tag, e.g.:
+
+            "9067179": {"decision_str": "W", "opponent": "Harvard-Westlake SL",
+                        "judge_raw": "Martinez, David ", "round_name": 1,
+                        "side": "Aff", "tourn": "Loyola Invitational",
+                        "tourn_id": 40342, "event_name": "Varsity LD", ...}
+
+        keyed by round_id, mapping round_id -> round data. This is
+        genuinely more reliable than scraping a rendered table would have
+        been -- clean field names, no HTML entity/whitespace cleanup
+        needed. _extract_round_data() finds and parses that object
+        directly rather than looking for table markup.
         """
         assert self._client is not None
         resp = await self._client.get(
@@ -307,48 +411,14 @@ class TabroomClient:
         soup = BeautifulSoup(resp.text, "html.parser")
         rounds: List[Dict[str, Any]] = []
 
-        for table in soup.find_all("table"):
-            headers = [th.get_text(strip=True).lower() for th in table.find_all("th")]
-            if not headers or "round" not in headers or "opponent" not in headers:
+        for script in soup.find_all("script"):
+            content = script.string or ""
+            if "opponent" not in content or "decision_str" not in content:
                 continue
-            if "decision" not in headers and "judge" not in headers:
-                continue
-
-            idx = {h: i for i, h in enumerate(headers)}
-
-            # The tournament name for this table lives in a preceding
-            # heading like "Loyola Invitational for Jason Rong on Open" --
-            # NOT YET VERIFIED which tag holds it (h1-h4? a plain div?), so
-            # this walks backward through preceding siblings/parents
-            # looking for text matching that "<tournament> for <name> on
-            # <division>" pattern rather than assuming a specific tag.
-            tourn_name = None
-            for el in table.find_all_previous(string=re.compile(r".+ for .+ on .+")):
-                tourn_name = str(el).split(" for ")[0].strip()
-                break
-
-            body_rows = table.find_all("tr")[1:]  # skip header row
-            for tr in body_rows:
-                cells = tr.find_all("td")
-                if len(cells) <= max(idx.get(k, 0) for k in idx):
-                    continue
-
-                def cell(key: str) -> str:
-                    i = idx.get(key)
-                    return cells[i].get_text(strip=True) if i is not None and i < len(cells) else ""
-
-                decision_raw = cell("decision").strip().lower()
-                result = _RESULT_MAP.get(decision_raw[:1]) if decision_raw else None
-
-                rounds.append(
-                    {
-                        "tournament": tourn_name,
-                        "round": cell("round"),
-                        "side": cell("side"),
-                        "opponent": cell("opponent"),
-                        "judge": cell("judge"),
-                        "result": result,
-                    }
-                )
+            round_map = _extract_round_data_object(content)
+            if round_map:
+                for round_id, data in round_map.items():
+                    rounds.append(_normalize_embedded_round(data))
+                break  # found the real data object, no need to check other scripts
 
         return rounds
