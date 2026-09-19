@@ -164,18 +164,50 @@ def _extract_round_data_object(script_text: str) -> Optional[Dict[str, Any]]:
 
 def _normalize_embedded_round(data: Dict[str, Any]) -> Dict[str, Any]:
     """Map the embedded JSON round record's field names onto the plain
-    dict shape the rest of this app expects."""
-    decision_raw = str(data.get("decision_str") or "").strip().lower()
-    result = _RESULT_MAP.get(decision_raw[:1]) if decision_raw else None
+    dict shape the rest of this app expects.
+
+    Result priority, confirmed against real elimination-round data:
+      1. Bye rounds (side == "BYE" or bye == 1) -> "Bye", not Win/Loss --
+         no actual round was played, so it shouldn't count toward a win
+         rate either way.
+      2. ballots_won / ballots_lost, when both present -> majority result.
+         This is the reliable signal for multi-judge panels. decision_str
+         is NOT simply "first letter = overall result" for panels --
+         confirmed on real data: a 2-1 panel win came back as "LWW", and
+         the judge order in decision_str doesn't even match judge_raw's
+         order, so trying to align them position-by-position isn't safe
+         either. ballots_won/lost sidesteps all of that.
+      3. Fall back to decision_str's first character (single-judge prelim
+         rounds, where ballots_won/lost may not be present).
+    """
+    is_bye = bool(data.get("bye")) or str(data.get("side") or "").strip().upper() == "BYE"
+
+    if is_bye:
+        result = "Bye"
+    else:
+        ballots_won = data.get("ballots_won")
+        ballots_lost = data.get("ballots_lost")
+        if ballots_won is not None and ballots_lost is not None:
+            if ballots_won > ballots_lost:
+                result = "Win"
+            elif ballots_lost > ballots_won:
+                result = "Loss"
+            else:
+                result = None  # tie -- shouldn't normally happen, but don't guess
+        else:
+            decision_raw = str(data.get("decision_str") or "").strip().lower()
+            result = _RESULT_MAP.get(decision_raw[:1]) if decision_raw else None
 
     round_label = data.get("round_label")
     round_name = data.get("round_name")
     round_display = str(round_label if round_label not in (None, "") else round_name or "")
 
+    side = None if is_bye else data.get("side")
+
     return {
         "tournament": data.get("tourn"),
         "round": round_display,
-        "side": data.get("side"),
+        "side": side,
         "opponent": data.get("opponent"),
         "judge": data.get("judge_raw") or data.get("judge"),
         "result": result,
